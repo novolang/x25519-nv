@@ -1,0 +1,204 @@
+// x25519_rules_tests.nv — the two rules RFC 7748 leaves to the
+// implementer, made checkable.
+//
+// An X25519 implementation has exactly two decisions a caller cannot
+// read off the bytes: whether it clamps on the way in or on the way
+// out, and whether it refuses an all-zero shared secret.  This package
+// clamps in the constructor and refuses the zero, and these cases are
+// what say so — so that a reader who suspects otherwise can run them
+// rather than read the prose.
+//
+// PROVENANCE.  Each `u` value below was run through the RFC 7748 §5
+// ladder against §6.1's own Alice scalar before it was written down,
+// and the ones asserted to give zero give zero.  The clamped scalar is
+// §6.1's Alice key with RFC 7748 §5's `decodeScalar25519` applied.
+//
+// RED ON PURPOSE: every body is a `todo()`.  Run with `--isolate`.
+
+use std.test
+use std.list
+use x25519
+
+fn hx(s: Str) -> [u8]
+    var out: [u8] = []
+    for i in 0..str.len(s) / 2
+        let hi = nibble(str.byte_at_or(s, i * 2, 0))
+        let lo = nibble(str.byte_at_or(s, i * 2 + 1, 0))
+        out = list.append(out, [(hi * 16 + lo) as u8])
+    out
+
+fn nibble(c: Int) -> Int
+    if c >= 48 and c <= 57
+        c - 48
+    else if c >= 97 and c <= 102
+        c - 97 + 10
+    else if c >= 65 and c <= 70
+        c - 65 + 10
+    else
+        0
+
+fn hex_of(b: [u8]) -> Str
+    var out = ""
+    for x in b
+        let v = x as Int
+        out = out + digit(v / 16) + digit(v % 16)
+    out
+
+fn digit(v: Int) -> Str
+    if v < 10
+        str.from_int(v)
+    else if v == 10
+        "a"
+    else if v == 11
+        "b"
+    else if v == 12
+        "c"
+    else if v == 13
+        "d"
+    else if v == 14
+        "e"
+    else
+        "f"
+
+// RFC 7748 §6.1's Alice scalar, which the exchange vectors use too.
+fn alice() -> [u8]
+    hx("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+
+@test
+fn test_clamping_happens_on_the_way_in_and_is_visible_on_the_way_out() [io]
+    // RULE ONE.  An implementation that clamped on the way OUT would
+    // agree with this one on every shared secret and disagree on every
+    // stored key, so this is the case that settles which it is — and
+    // it is the case a caller comparing a persisted key with its own
+    // entropy needs to have read.
+    test.case("§6.1's Alice scalar comes back clamped, not as it went in")
+    match x25519.secret_key_from_bytes(alice())
+        Err(_) => test.fail("32 bytes is the right width")
+        Ok(k)  =>
+            test.assert_eq_str(hex_of(x25519.secret_key_bytes(k)),
+                "70076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c6a")
+            test.assert(hex_of(x25519.secret_key_bytes(k)) != hex_of(alice()))
+
+    test.case("all-ones clamps to a scalar with the low three bits and bit 255 clear")
+    var ones: [u8] = []
+    for _i in 0..32
+        ones = list.append(ones, [255 as u8])
+    match x25519.secret_key_from_bytes(ones)
+        Err(_) => test.fail("32 bytes is the right width")
+        Ok(k)  =>
+            test.assert_eq_str(hex_of(x25519.secret_key_bytes(k)),
+                "f8ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f")
+
+    test.case("all-zeros clamps to a scalar with bit 254 set, so a ladder always runs 255 steps")
+    var zeros: [u8] = []
+    for _i in 0..32
+        zeros = list.append(zeros, [0 as u8])
+    match x25519.secret_key_from_bytes(zeros)
+        Err(_) => test.fail("32 bytes is the right width")
+        Ok(k)  =>
+            test.assert_eq_str(hex_of(x25519.secret_key_bytes(k)),
+                "0000000000000000000000000000000000000000000000000000000000000040")
+
+    test.case("clamping twice is clamping once")
+    match x25519.secret_key_from_bytes(alice())
+        Err(_) => test.fail("32 bytes is the right width")
+        Ok(k)  =>
+            match x25519.secret_key_from_bytes(x25519.secret_key_bytes(k))
+                Err(_) => test.fail("a clamped scalar is 32 bytes")
+                Ok(k2) => test.assert_eq_str(hex_of(x25519.secret_key_bytes(k2)),
+                    hex_of(x25519.secret_key_bytes(k)))
+
+@test
+fn test_a_low_order_peer_key_is_refused_rather_than_answered() [io]
+    // RULE TWO.  RFC 7748 §6.1 makes this check optional; this package
+    // makes it.  Each `u` below yields 32 zero bytes against Alice's
+    // scalar — a "shared" secret the peer chose and already knows.
+    test.case("u = 0")
+    assert_refused("0000000000000000000000000000000000000000000000000000000000000000")
+    test.case("u = 1")
+    assert_refused("0100000000000000000000000000000000000000000000000000000000000000")
+    test.case("the first point of order 8")
+    assert_refused("e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800")
+    test.case("the second point of order 8")
+    assert_refused("5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157")
+    test.case("u = p - 1, which is the point of order 4")
+    assert_refused("ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f")
+    test.case("u = p, a non-canonical spelling of zero")
+    assert_refused("edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f")
+    test.case("u = p + 1, a non-canonical spelling of one")
+    assert_refused("eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f")
+
+fn assert_refused(u_hex: Str) [io]
+    match x25519.secret_key_from_bytes(alice())
+        Err(_) => test.fail("32 bytes is the right width")
+        Ok(k)  =>
+            match x25519.public_key_from_bytes(hx(u_hex))
+                Err(_) => test.fail("32 bytes is the right width; the value is the question")
+                Ok(u)  =>
+                    match x25519.diffie_hellman(k, u)
+                        Ok(_)  => test.fail("an all-zero secret is one the peer already knows")
+                        Err(e) =>
+                            match e
+                                X25519SharedSecretIsZero => test.assert(true)
+                                _                        => test.fail("the refusal names the zero")
+
+@test
+fn test_the_raw_primitive_does_not_refuse_what_the_exchange_refuses() [io]
+    // The reason `scalar_mult` and `diffie_hellman` are two functions.
+    // A caller reaching for the primitive has said it wants the
+    // arithmetic — a test vector, a construction with its own rule —
+    // and gets it, zero and all.
+    test.case("scalar_mult answers 32 zero bytes where diffie_hellman refuses")
+    match x25519.secret_key_from_bytes(alice())
+        Err(_) => test.fail("32 bytes is the right width")
+        Ok(k)  =>
+            match x25519.public_key_from_bytes(hx("0100000000000000000000000000000000000000000000000000000000000000"))
+                Err(_) => test.fail("32 bytes is the right width")
+                Ok(u)  =>
+                    test.assert_eq_str(hex_of(x25519.scalar_mult(k, u)),
+                        "0000000000000000000000000000000000000000000000000000000000000000")
+
+@test
+fn test_low_order_keys_can_be_rejected_when_they_arrive() [io]
+    // The same question asked at the boundary rather than at use, for
+    // a server storing a client's static key: it should not wait until
+    // a session to find out the key is worthless.
+    test.case("is_low_order finds all five values, in whatever spelling")
+    assert_low("0000000000000000000000000000000000000000000000000000000000000000")
+    assert_low("0100000000000000000000000000000000000000000000000000000000000000")
+    assert_low("e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800")
+    assert_low("5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157")
+    assert_low("ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f")
+    assert_low("edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f")
+    assert_low("eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f")
+
+    test.case("and says no to a real one")
+    match x25519.public_key_from_bytes(hx("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"))
+        Err(_) => test.fail("32 bytes is the right width")
+        Ok(k)  => test.assert(x25519.is_low_order(k) == false)
+
+fn assert_low(u_hex: Str) [io]
+    match x25519.public_key_from_bytes(hx(u_hex))
+        Err(_) => test.fail("32 bytes is the right width")
+        Ok(k)  => test.assert(x25519.is_low_order(k))
+
+@test
+fn test_a_key_pair_is_the_two_halves_of_one_scalar() [io]
+    test.case("the pair's secret is the clamped scalar and its public is that scalar's point")
+    match x25519.key_pair_from_random(alice())
+        Err(_) => test.fail("32 bytes is the right width")
+        Ok(kp) =>
+            test.assert_eq_str(hex_of(x25519.secret_key_bytes(kp.secret)),
+                "70076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c6a")
+            test.assert_eq_str(hex_of(x25519.public_key_bytes(kp.public)),
+                "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a")
+
+    test.case("a short entropy list is refused by width, not padded")
+    match x25519.key_pair_from_random(hx("01"))
+        Ok(_)  => test.fail("one byte is not 32 bytes of entropy")
+        Err(e) =>
+            match e
+                X25519SecretKeyLengthWrong(got, want) =>
+                    test.assert_eq(got, 1)
+                    test.assert_eq(want, 32)
+                _                                     => test.fail("the refusal names the scalar's width")

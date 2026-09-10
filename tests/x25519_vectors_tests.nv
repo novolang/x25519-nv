@@ -1,0 +1,177 @@
+// x25519_vectors_tests.nv — RFC 7748 §5.2 and §6.1, written against
+// the signatures.
+//
+// THESE ARE THE ORACLE.  A key exchange that is subtly wrong produces
+// 32 bytes that look exactly like 32 right ones, and the failure shows
+// up as "the other end cannot decrypt anything" against a peer that
+// runs different software.  So the vectors the RFC publishes go in
+// with the interface rather than after it.
+//
+// They COMPILE today and they FAIL at run, with `not implemented:
+// x25519-nv.x25519.<fn>` from the `todo()` that is each body.
+//
+// PROVENANCE.  Every expected value below was recomputed — the §6.1
+// exchange against a reference X25519, the §5.2 scalar multiplications
+// against the ladder as RFC 7748 §5 writes it — before it was written
+// down.
+//
+// Run with `--isolate` for one verdict per `@test`.
+
+use std.test
+use std.list
+use x25519
+
+fn hx(s: Str) -> [u8]
+    var out: [u8] = []
+    for i in 0..str.len(s) / 2
+        let hi = nibble(str.byte_at_or(s, i * 2, 0))
+        let lo = nibble(str.byte_at_or(s, i * 2 + 1, 0))
+        out = list.append(out, [(hi * 16 + lo) as u8])
+    out
+
+fn nibble(c: Int) -> Int
+    if c >= 48 and c <= 57
+        c - 48
+    else if c >= 97 and c <= 102
+        c - 97 + 10
+    else if c >= 65 and c <= 70
+        c - 65 + 10
+    else
+        0
+
+fn hex_of(b: [u8]) -> Str
+    var out = ""
+    for x in b
+        let v = x as Int
+        out = out + digit(v / 16) + digit(v % 16)
+    out
+
+fn digit(v: Int) -> Str
+    if v < 10
+        str.from_int(v)
+    else if v == 10
+        "a"
+    else if v == 11
+        "b"
+    else if v == 12
+        "c"
+    else if v == 13
+        "d"
+    else if v == 14
+        "e"
+    else
+        "f"
+
+@test
+fn test_rfc7748_5_2_first_scalar_multiplication() [io]
+    // The raw primitive, on a `u` that is not the base point.  §5.2's
+    // scalar is written as it goes in, unclamped — clamping is the
+    // constructor's job here, which is one of this package's two
+    // stated rules — so this case also pins that the clamping happens
+    // and happens once.
+    test.case("RFC 7748 §5.2, first vector")
+    match x25519.secret_key_from_bytes(hx("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4"))
+        Err(_) => test.fail("32 bytes is the right width")
+        Ok(k)  =>
+            match x25519.public_key_from_bytes(hx("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c"))
+                Err(_) => test.fail("32 bytes is the right width")
+                Ok(u)  =>
+                    test.assert_eq_str(hex_of(x25519.scalar_mult(k, u)),
+                        "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552")
+
+@test
+fn test_rfc7748_5_2_second_scalar_multiplication() [io]
+    test.case("RFC 7748 §5.2, second vector")
+    match x25519.secret_key_from_bytes(hx("4b66e9d4d1b4673c5ad22691957d6af5c11b6421e0ea01d42ca4169e7918ba0d"))
+        Err(_) => test.fail("32 bytes is the right width")
+        Ok(k)  =>
+            match x25519.public_key_from_bytes(hx("e5210f12786811d3f4b7959d0538ae2c31dbe7106fc03c3efc4cd549c715a493"))
+                Err(_) => test.fail("32 bytes is the right width")
+                Ok(u)  =>
+                    test.assert_eq_str(hex_of(x25519.scalar_mult(k, u)),
+                        "95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957")
+
+@test
+fn test_rfc7748_6_1_the_whole_exchange() [io]
+    // The one that matters: two parties, two key pairs, one secret,
+    // and the property the exchange exists for — both sides compute
+    // the same 32 bytes from different halves.
+    let alice_priv = hx("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+    let bob_priv = hx("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb")
+    let want_shared = "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
+
+    test.case("§6.1 Alice's public key is her scalar times the base point")
+    match x25519.key_pair_from_random(alice_priv)
+        Err(_) => test.fail("32 bytes is the right width")
+        Ok(a)  =>
+            test.assert_eq_str(hex_of(x25519.public_key_bytes(a.public)),
+                "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a")
+
+            test.case("§6.1 and Bob's is his")
+            match x25519.key_pair_from_random(bob_priv)
+                Err(_) => test.fail("32 bytes is the right width")
+                Ok(b)  =>
+                    test.assert_eq_str(hex_of(x25519.public_key_bytes(b.public)),
+                        "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f")
+
+                    test.case("§6.1 Alice's scalar and Bob's key give the shared secret")
+                    match x25519.diffie_hellman(a.secret, b.public)
+                        Err(_) => test.fail("neither key is a low-order point")
+                        Ok(s)  => test.assert_eq_str(hex_of(s), want_shared)
+
+                    test.case("§6.1 and so do Bob's scalar and Alice's key — that is the exchange")
+                    match x25519.diffie_hellman(b.secret, a.public)
+                        Err(_) => test.fail("neither key is a low-order point")
+                        Ok(s)  => test.assert_eq_str(hex_of(s), want_shared)
+
+@test
+fn test_the_base_point_multiplication_is_the_public_key() [io]
+    // `public_key_of` is `scalar_mult_base` with the result wrapped,
+    // and this is the case that says the two do not drift apart.
+    let alice_priv = hx("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+
+    test.case("scalar_mult_base and public_key_of agree")
+    match x25519.secret_key_from_bytes(alice_priv)
+        Err(_) => test.fail("32 bytes is the right width")
+        Ok(k)  =>
+            test.assert_eq_str(hex_of(x25519.scalar_mult_base(k)),
+                "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a")
+            test.assert_eq_str(hex_of(x25519.public_key_bytes(x25519.public_key_of(k))),
+                hex_of(x25519.scalar_mult_base(k)))
+
+@test
+fn test_the_widths_are_the_curve_s() [io]
+    // The one part of the interface that is real today: a caller
+    // sizing a buffer can rely on these before any body lands.
+    test.case("a scalar, a public key and a shared secret are all 32 bytes")
+    test.assert_eq(x25519.X25519_SECRET_KEY_BYTES, 32)
+    test.assert_eq(x25519.X25519_PUBLIC_KEY_BYTES, 32)
+    test.assert_eq(x25519.X25519_SHARED_SECRET_BYTES, 32)
+
+@test
+fn test_a_width_that_is_not_the_curve_s_is_refused_by_length() [io]
+    test.case("a short scalar names its two numbers")
+    match x25519.secret_key_from_bytes(hx("0102"))
+        Ok(_)  => test.fail("two bytes are not an X25519 scalar")
+        Err(e) =>
+            match e
+                X25519SecretKeyLengthWrong(got, want) =>
+                    test.assert_eq(got, 2)
+                    test.assert_eq(want, 32)
+                _                                     => test.fail("a width problem is X25519SecretKeyLengthWrong")
+
+    test.case("and so does a short public key")
+    match x25519.public_key_from_bytes(hx("0102"))
+        Ok(_)  => test.fail("two bytes are not a u coordinate")
+        Err(e) =>
+            match e
+                X25519PublicKeyLengthWrong(got, want) =>
+                    test.assert_eq(got, 2)
+                    test.assert_eq(want, 32)
+                _                                     => test.fail("a width problem is X25519PublicKeyLengthWrong")
+
+    test.case("a public key of the right width reads back byte for byte")
+    let raw = hx("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a")
+    match x25519.public_key_from_bytes(raw)
+        Err(_) => test.fail("32 bytes is the right width")
+        Ok(k)  => test.assert_eq_str(hex_of(x25519.public_key_bytes(k)), hex_of(raw))

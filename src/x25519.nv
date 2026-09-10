@@ -1,0 +1,290 @@
+// x25519.nv — the Diffie-Hellman half of Curve25519, and the two
+// rules an implementation of it must state out loud.
+//
+// Every body is a `todo()`.  The signatures and the effect rows are
+// the design and the compiler checks them as claims; see the README
+// for the stamp and for what is deliberately absent.
+//
+// THE FUNCTION.  RFC 7748 §5 defines X25519 as a scalar multiplication
+// on the Montgomery curve `v² = u³ + 486662·u² + u` over
+// GF(2²⁵⁵ − 19), computed by a ladder that carries only the `u`
+// coordinate.  Everything is 32 bytes, everything is little-endian,
+// and there is no point encoding to get wrong: a public key IS a `u`
+// coordinate.  That is why this is the exchange everyone reaches for.
+//
+// THE TWO RULES.  An X25519 implementation has exactly two decisions
+// to make that the specification leaves visible, and a caller cannot
+// tell which way they went by looking at the bytes.  This package
+// states both:
+//
+//   CLAMPING happens inside every constructor.  RFC 7748 §5 clears the
+//   low three bits and bit 255 of a secret scalar and sets bit 254, and
+//   this package does it in `secret_key_from_bytes` rather than
+//   expecting the caller to.  So `secret_key_bytes` may not return the
+//   32 bytes that went in, and the doc comment on it says so — an
+//   implementation that clamped on the way OUT instead would agree
+//   with this one on every shared secret and disagree on every stored
+//   key.
+//
+//   AN ALL-ZERO SHARED SECRET IS REFUSED.  RFC 7748 §6.1 says the
+//   check is optional.  This package makes it, and
+//   `X25519SharedSecretIsZero` is the refusal.  The argument is below,
+//   on `diffie_hellman`.
+//
+// BYTES ARE `[u8]`, matching p256-nv and ed25519-nv, so the three
+// curve packages have one shape between them.
+
+// `fe25519` — ed25519-nv's field and its scalar clamping — is this
+// package's whole dependency and is named in the manifest, but no line
+// here calls it yet: every body is a `todo()`, and an import nothing
+// uses is a warning.  The `use` arrives with the first body.
+
+// The width of a secret scalar, in bytes.
+pub const X25519_SECRET_KEY_BYTES = 32
+
+// The width of a public key, in bytes.  It is a `u` coordinate and
+// nothing else — no format byte, no sign bit, no second coordinate.
+pub const X25519_PUBLIC_KEY_BYTES = 32
+
+// The width of a shared secret, in bytes.
+//
+// **It is not a key.**  It is a `u` coordinate with structure in it,
+// and RFC 7748 §6.1 says to run it through a key derivation function
+// before using it for anything.  `hash_len(HkdfSha256)` bytes out of
+// hkdf-nv's `extract` is the shape that gives.
+pub const X25519_SHARED_SECRET_BYTES = 32
+
+// A clamped secret scalar.
+//
+// CLAMPED, which is the whole reason this is a type rather than 32
+// bytes: every value of it has had the low three bits and bit 255
+// cleared and bit 254 set, because the only constructor does that.  So
+// a scalar that exists is one the ladder runs in constant time and one
+// that is a multiple of the cofactor.
+pub struct X25519SecretKey
+    // Exactly `X25519_SECRET_KEY_BYTES` bytes, already clamped.
+    scalar: [u8]
+
+// A peer's public key: a `u` coordinate.
+//
+// Length-checked and nothing more.  There is no validation to do here
+// that is worth doing separately — X25519 has no invalid-curve attack
+// of the kind P-256's `validate` closes, because the ladder is
+// twist-secure: a `u` that is not on the curve is on the quadratic
+// twist, whose order is also large enough that nothing leaks.  What
+// remains is the low-order points, and `diffie_hellman` catches those
+// by refusing the all-zero output rather than by enumerating them.
+pub struct X25519PublicKey
+    // Exactly `X25519_PUBLIC_KEY_BYTES` bytes, little-endian.
+    u: [u8]
+
+// A scalar and the public key it generates.
+//
+// The two halves are always consistent: there is no constructor that
+// takes both, only ones that derive the public half from the secret.
+pub struct X25519KeyPair
+    // The public half.
+    public: X25519PublicKey
+    // The secret half, clamped.
+    secret: X25519SecretKey
+
+// Why a key or a shared secret could not be produced.
+//
+// Two of the three are widths.  The third is this package's one
+// interface decision that RFC 7748 leaves to the implementer.
+pub enum X25519Error
+    // A byte list of the wrong width reached a secret-key constructor.
+    X25519SecretKeyLengthWrong(got: Int, want: Int)
+    // A byte list of the wrong width reached a public-key constructor.
+    X25519PublicKeyLengthWrong(got: Int, want: Int)
+    // The exchange produced 32 zero bytes, which means the peer's
+    // public key was one of the low-order points and the "shared"
+    // secret is a constant the peer already knew.  RFC 7748 §6.1 makes
+    // this check OPTIONAL; this package makes it.  `diffie_hellman`
+    // says why.
+    X25519SharedSecretIsZero
+
+// What went wrong, in words, for a caller that logs rather than
+// branches.
+//
+// `Result<_, X25519Error>` requires it: SPEC §3.4 admits a `Result`
+// error type only if it implements `Error`, so this impl is what lets
+// every constructor below name its own refusal instead of returning
+// `Result<_, Str>`.
+impl Error for X25519Error
+    fn message(self) -> Str
+        todo("x25519-nv.x25519.X25519Error.message")
+
+// Read a secret scalar from 32 bytes the CALLER supplies, clamping it.
+//
+// This package has no `[rand]` row and never will: entropy is the
+// host's, and a `core` package that reached for it could not run in
+// firmware.  Hand it 32 bytes from a source you trust — rand-nv, an
+// nRF52's RNG peripheral, `/dev/urandom` — and every one of the 2²⁵⁶
+// possibilities becomes a usable scalar, so the only refusal is the
+// width.
+//
+// **The bytes are clamped here, not later.**  RFC 7748 §5's
+// `decodeScalar25519` clears the low three bits and bit 255 and sets
+// bit 254, and this constructor is where that happens, so a value of
+// this type is always ready for the ladder.  The consequence a caller
+// must know is on `secret_key_bytes`.
+//
+// ```novo
+// use std.list
+// use x25519
+//
+// fn main() [io]
+//     var e: [u8] = []
+//     for _i in 0..32
+//         e = list.append(e, [9 as u8])
+//     match x25519.secret_key_from_bytes(e)
+//         Ok(_)  => println("a scalar")
+//         Err(_) => println("refused")
+// ```
+pub fn secret_key_from_bytes(random_bytes: [u8]) -> Result<X25519SecretKey, X25519Error> []
+    todo("x25519-nv.x25519.secret_key_from_bytes")
+
+// The 32 bytes of a secret scalar, **as clamped**.
+//
+// NOT NECESSARILY THE BYTES THAT WENT IN.  `secret_key_from_bytes`
+// clamps, so up to five bits of what a caller handed over are gone by
+// the time they come back here.  That is the right way round — a
+// stored key is then one nothing has to remember to clamp — but it is
+// visible, and a caller that persists a key and compares it with its
+// own entropy will see a difference.  Persist THIS, not the entropy.
+//
+// It is the one function here that hands out secret key material, and
+// it exists because persisting a key is a real thing to want.
+pub fn secret_key_bytes(k: X25519SecretKey) -> [u8] []
+    todo("x25519-nv.x25519.secret_key_bytes")
+
+// Read a peer's public key from 32 little-endian bytes.
+//
+// Checks the width and nothing else, and there is nothing else worth
+// checking: bit 255 is masked away per RFC 7748 §5, a `u` at or above
+// the field prime reduces, and a `u` that is not on the curve is on
+// the twist, which is safe.  The low-order points are the one real
+// hazard and `diffie_hellman` refuses their result rather than
+// enumerating them here.
+pub fn public_key_from_bytes(u: [u8]) -> Result<X25519PublicKey, X25519Error> []
+    todo("x25519-nv.x25519.public_key_from_bytes")
+
+// The 32 bytes of a public key, as they go on the wire.
+pub fn public_key_bytes(k: X25519PublicKey) -> [u8] []
+    todo("x25519-nv.x25519.public_key_bytes")
+
+// Derive the public half of a key pair from a secret scalar.
+//
+// One ladder against the base point `u = 9`, which is
+// `scalar_mult_base`.  It cannot fail — the base point is not a
+// low-order point and a clamped scalar is never zero modulo the group
+// order — so it is not a `Result`.
+pub fn public_key_of(k: X25519SecretKey) -> X25519PublicKey []
+    todo("x25519-nv.x25519.public_key_of")
+
+// Build a key pair from 32 random bytes the caller supplies.
+//
+// `secret_key_from_bytes` followed by `public_key_of`, which is what a
+// caller opening a session actually wants.
+//
+// ```novo
+// use std.list
+// use x25519
+//
+// fn main() [io]
+//     var e: [u8] = []
+//     for _i in 0..32
+//         e = list.append(e, [9 as u8])
+//     match x25519.key_pair_from_random(e)
+//         Ok(kp) => println("${list.len(x25519.public_key_bytes(kp.public))}")
+//         Err(_) => println("refused")
+// ```
+pub fn key_pair_from_random(random_bytes: [u8]) -> Result<X25519KeyPair, X25519Error> []
+    todo("x25519-nv.x25519.key_pair_from_random")
+
+// The raw scalar multiplication: `k · u`, as RFC 7748 §5 defines it.
+//
+// The Montgomery ladder, 255 steps, each one a conditional swap and a
+// differential add-and-double, taking the same time for every scalar —
+// which is what `fe25519.cswap` is for and why the scalar is clamped
+// before it gets here.
+//
+// **This is the primitive, not the protocol.**  It does not refuse an
+// all-zero result, because a caller reaching for this one has said it
+// wants the arithmetic: a test vector, a hash-to-curve construction, a
+// protocol that has its own contributory-behaviour rule.  For a key
+// exchange, call `diffie_hellman`.
+pub fn scalar_mult(k: X25519SecretKey, peer: X25519PublicKey) -> [u8] []
+    todo("x25519-nv.x25519.scalar_mult")
+
+// `k · 9`: the scalar multiplication against the curve's base point.
+//
+// The same ladder with `u = 9`, which RFC 7748 §4.1 fixes as the base
+// point.  `public_key_of` is this with the result wrapped in a type.
+pub fn scalar_mult_base(k: X25519SecretKey) -> [u8] []
+    todo("x25519-nv.x25519.scalar_mult_base")
+
+// The Diffie-Hellman shared secret between `k` and `peer`.
+//
+// `scalar_mult` with the low-order check made, and the difference is
+// the whole reason both functions exist.
+//
+// **AN ALL-ZERO OUTPUT IS REFUSED.**  RFC 7748 §6.1 says: "protocols
+// MAY check for the all-zero value" and "this check is not necessary
+// for [some] protocols".  This package makes the check and returns
+// `X25519SharedSecretIsZero`, for three reasons:
+//
+//   - An all-zero output means the peer sent one of the low-order
+//     points.  The "shared" secret is then a constant that the peer
+//     chose and already knows, so anything derived from it is known to
+//     the peer too.
+//   - The protocols for which the check is unnecessary are the ones
+//     that authenticate the transcript afterwards, and they know who
+//     they are; the ones that do not are the ones written by somebody
+//     reaching for a Diffie-Hellman in a hurry.  A default that is safe
+//     for the second group and merely redundant for the first is the
+//     right default.
+//   - A caller who genuinely wants the unchecked value has
+//     `scalar_mult`, one line away, named for what it is.
+//
+// **The result is not a key.**  It is a `u` coordinate with structure
+// in it, and RFC 7748 §6.1 says to run it through a key derivation
+// function.  hkdf-nv's `extract` over it, with the handshake
+// transcript as the salt, is what the protocols that get this right
+// do.
+//
+// ```novo
+// use std.list
+// use x25519
+//
+// fn main() [io]
+//     var e: [u8] = []
+//     for _i in 0..32
+//         e = list.append(e, [9 as u8])
+//     match x25519.key_pair_from_random(e)
+//         Err(_) => println("refused")
+//         Ok(kp) =>
+//             match x25519.diffie_hellman(kp.secret, kp.public)
+//                 Ok(s)  => println("${list.len(s)}")
+//                 Err(_) => println("a low-order peer key")
+// ```
+pub fn diffie_hellman(k: X25519SecretKey, peer: X25519PublicKey) -> Result<[u8], X25519Error> []
+    todo("x25519-nv.x25519.diffie_hellman")
+
+// Is `u` one of the points whose exchange yields the all-zero secret?
+//
+// The question `diffie_hellman` answers by refusing its own output,
+// available separately for a caller that wants to reject a peer's key
+// at the moment it arrives rather than at the moment it is used — a
+// server storing a client's static key, for instance, which should not
+// wait until a session to find out the key is worthless.
+//
+// There are five such `u` values modulo the prime — 0, 1, −1 and the
+// two of order 8 — and more 32-byte encodings than that, because a
+// value at or above the prime reduces: `p`, `p + 1` and `p − 1` are
+// three more spellings of three of them.  Checking the OUTPUT stays
+// the primary route, because it catches every case without a table and
+// a table is a thing that can be missing an entry.
+pub fn is_low_order(u: X25519PublicKey) -> Bool []
+    todo("x25519-nv.x25519.is_low_order")

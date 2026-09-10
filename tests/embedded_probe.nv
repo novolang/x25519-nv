@@ -1,0 +1,55 @@
+// embedded_probe.nv — the package's device claim, as a program that
+// either builds for a Cortex-M or does not.
+//
+// The shard audit's `core-embedded` row copies this and the modules
+// its `use` lines reach into a package of its own and runs
+//
+//   novo build --target=nrf52-qemu src/probe.nv
+//
+// which produces a real Cortex-M4 ELF or fails.  The claim it settles
+// is the one that makes `layer = "core"` worth writing: X25519 is the
+// exchange a sensor uses to open a session with a gateway, on a part
+// with no operating system under it, and a package that could not
+// compile there would be claiming a budget it does not keep.
+//
+// It BUILDS or it does not; it never runs.  Every function it calls is
+// a `todo()` today, so a device that executed this would panic on the
+// first line of `main`.  What is being checked is the TIER:
+// `--target=nrf52-qemu` stamps `@tier(embedded)` on every function it
+// compiles, so the checker walks the whole module and refuses a `Str`
+// concatenation, a denied stdlib entry or an unbounded `while`
+// wherever the implementation later puts one.
+//
+// **It does not build today**, for the same two open toolchain defects
+// ed25519-nv's probe records — `Result<T, E>` cannot be spelled at
+// this tier because the `Error` trait is not in the prelude there, and
+// a `[u8]` cannot be READ at this tier because `list.get` is not on
+// the embedded surface.  The signatures keep both rather than
+// retreating from either; the README says why.
+
+use x25519
+
+// Thirty-two bytes, built the way firmware builds a fixed buffer: one
+// allocation with the capacity in the source, and pushes that cannot
+// grow it.
+fn entropy() -> [u8]
+    var b: [u8] = list.with_capacity(32)
+    for _i in 0..32
+        let _ = list.try_push(b, 9 as u8)
+    b
+
+fn main() [hw]
+    // The three shapes the backend lowers differently — a Result over
+    // a struct, a Bool over a struct, and a Result over a byte list —
+    // so "it compiles for one return type" is not what this proves.
+    let kp: Result<X25519KeyPair, X25519Error> = x25519.key_pair_from_random(entropy())
+    match kp
+        Err(_)   => hal.uart.write("x25519-nv: refused\n")
+        Ok(pair) =>
+            if x25519.is_low_order(pair.public)
+                hal.uart.write("x25519-nv: a worthless key\n")
+            else
+                let s: Result<[u8], X25519Error> = x25519.diffie_hellman(pair.secret, pair.public)
+                match s
+                    Err(_) => hal.uart.write("x25519-nv: no shared secret\n")
+                    Ok(_)  => hal.uart.write("x25519-nv: shared secret\n")

@@ -1,0 +1,46 @@
+[package]
+name        = "x25519-nv"
+version     = "0.0.1"
+description = "X25519 Diffie-Hellman over Curve25519: a key pair from 32 caller-supplied random bytes, the Montgomery ladder, and a shared secret.  Clamping happens inside every constructor rather than being a caller's step, and an all-zero shared secret is REFUSED — RFC 7748 makes that check optional and this package makes it."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`: every function here is arithmetic over bytes the caller
+# already holds.  Nothing is read and no clock is consulted — the
+# randomness a key pair needs arrives as an argument, which is what
+# lets the same code run in firmware.  `tests/embedded_probe.nv` is
+# that claim as a program; the README says what it costs today.
+layer       = "core"
+
+category    = "crypto"
+
+tags        = ["x25519", "curve25519", "ecdh", "diffie-hellman", "key-exchange", "rfc-7748", "montgomery-ladder"]
+repository  = "https://github.com/novolang/x25519-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type- and effect-checks
+# every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "The exchange half of Curve25519, with the zero check made"
+
+[dependencies]
+# ed25519-nv supplies `fe25519`: the prime field GF(2^255 - 19) and the
+# scalar clamping.  X25519 and Ed25519 are two schemes over ONE field
+# and share nothing above it — this one runs a Montgomery ladder that
+# never forms a y coordinate — so the module boundary is exactly the
+# field, and the dependency direction is the one the grid states: this
+# package is split out of ed25519-nv.
+#
+# A path while the two are developed together.  THE COORDINATOR
+# CONVERTS THIS TO `^0.0.1` AT PUBLISH: a published package depends on
+# published packages by range, and `novo pkg publish` refuses the path
+# form outright.  Under the caret rule `^0.0.1` means exactly 0.0.1.
+ed25519-nv = "^0.0.1"
