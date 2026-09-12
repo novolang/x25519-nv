@@ -1,6 +1,6 @@
 [package]
 name        = "x25519-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "X25519 Diffie-Hellman over Curve25519: a key pair from 32 caller-supplied random bytes, the Montgomery ladder, and a shared secret.  Clamping happens inside every constructor rather than being a caller's step, and an all-zero shared secret is REFUSED — RFC 7748 makes that check optional and this package makes it."
 license     = "Apache-2.0"
 
